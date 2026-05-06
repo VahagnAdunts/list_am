@@ -1,0 +1,52 @@
+name: list.am monitor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: listam-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run monitor
+        env:
+          LISTAM_FETCHER: curl_cffi
+          LISTAM_STORAGE: local
+          LISTAM_NOTIFIER: telegram
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python monitor_listam.py
+
+      - name: Commit updated IDs
+        run: |
+          if [[ -n "$(git status --porcelain listam_listings.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add listam_listings.json
+            git commit -m "Add new list.am listing id(s) [skip ci]"
+            git push
+          else
+            echo "No changes to listam_listings.json"
+          fi

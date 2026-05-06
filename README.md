@@ -50,55 +50,52 @@ browser with `--browser-binary "/Applications/Google Chrome.app/..."`.
 The IDs file is updated only for listings whose notification actually
 succeeded; the rest are retried on the next run.
 
-## Production on Render (Cron Job)
+## Production on GitHub Actions
 
-Render's filesystem is ephemeral, so the IDs JSON has to live somewhere
-durable. The simplest option is to keep it in your GitHub repo and have the
-cron job commit changes back to it via the GitHub API.
+The cron lives in [`.github/workflows/monitor.yml`](.github/workflows/monitor.yml)
+and runs every 15 minutes on GitHub-hosted runners. Each run:
+
+1. Checks out the repo (so it has the current `listam_listings.json`).
+2. Installs `curl_cffi`.
+3. Runs `python monitor_listam.py` with `LISTAM_STORAGE=local` and
+   `LISTAM_NOTIFIER=telegram`.
+4. If `listam_listings.json` changed, commits and pushes the diff back as
+   `github-actions[bot]`. The workflow's auto-provided `GITHUB_TOKEN` has
+   `contents: write` so no Personal Access Token is needed.
 
 ### One-time setup
 
 1. **Create a Telegram bot.**
    - Talk to [@BotFather](https://t.me/BotFather) in Telegram, run `/newbot`,
      copy the token.
-   - Send any message to your new bot, then visit
+   - Send any message to your new bot, then open
      `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy your
-     `chat.id`.
-2. **Create a GitHub fine-grained PAT.**
-   - GitHub → Settings → Developer settings → Personal access tokens →
-     Fine-grained tokens.
-   - Repository access: only this repo.
-   - Repository permissions: **Contents: Read and write**.
-   - Copy the token.
-3. **Push this project to a GitHub repo** (private is fine). Make sure
+     `chat.id`. Or message **@userinfobot** to get the id instantly.
+2. **Push this project to a GitHub repo** (private is fine). Make sure
    `listam_listings.json` is committed at the repo root.
+3. **Add the Telegram secrets to the repo.**
+   - Repo → Settings → Secrets and variables → Actions.
+   - Add `TELEGRAM_BOT_TOKEN` (BotFather token) and `TELEGRAM_CHAT_ID`.
 
-### Deploy
+### Trigger and verify
 
-The repo includes [`render.yaml`](render.yaml). On Render:
+- Repo → **Actions** tab → **list.am monitor** → **Run workflow**.
+- Successful logs print either `No new listings found.` or
+  `Saved N new ID(s) via local.` followed by a `[skip ci]` commit by
+  `github-actions[bot]` and N Telegram messages.
 
-1. New → Blueprint → connect this repo.
-2. Render reads `render.yaml` and offers a Cron Job named `listam-monitor`.
-3. Fill in the secrets it asks for:
-   - `GITHUB_REPO` — `your-username/your-repo`.
-   - `GITHUB_TOKEN` — the PAT from step 2.
-   - `TELEGRAM_BOT_TOKEN` — the BotFather token.
-   - `TELEGRAM_CHAT_ID` — your chat id.
-4. Apply. The job runs every 15 minutes (`*/15 * * * *`); change the
-   `schedule` field to adjust.
-
-The cron container boots, runs `python monitor_listam.py`, and exits. Each
-new listing triggers a Telegram message and the IDs JSON is committed back to
-your repo.
+To change the cadence, edit the `cron:` line in
+`.github/workflows/monitor.yml`. GitHub may delay scheduled runs by a few
+minutes during high load, which is fine for this use case.
 
 ### Why curl_cffi instead of a webdriver
 
 `curl_cffi` reuses libcurl-impersonate to mimic Chrome's TLS / HTTP/2
 fingerprint, which is what list.am's anti-bot is actually checking. It's a
-~10 MB pip install, runs fine on Render's free Python plan, and needs no
-browser or webdriver. If list.am ever blocks it, switch to the `browser`
-fetcher — it requires bundling Chrome with a custom Dockerfile (Render
-Native Runtimes don't include it).
+~10 MB pip install, no browser or webdriver needed.
+
+If list.am ever blocks GitHub's runner IPs as well, fall back to running the
+script on a residential IP (e.g. your own machine via `launchd` or `cron`).
 
 ## Configuration reference
 
