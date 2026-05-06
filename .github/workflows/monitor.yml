@@ -35,6 +35,7 @@ jobs:
           LISTAM_FETCHER: curl_cffi
           LISTAM_STORAGE: local
           LISTAM_NOTIFIER: telegram
+          LISTAM_MAX_NEW_PER_RUN: "30"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor_listam.py

@@ -277,6 +277,8 @@ def _fetch_with_browser(url: str, browser_binary: str | None) -> str:
 
 
 class Storage(Protocol):
+    def describe(self) -> str: ...
+
     def read(self) -> list[str]: ...
 
     def write(self, ids: Iterable[str], message: str) -> None: ...
@@ -285,6 +287,9 @@ class Storage(Protocol):
 class LocalStorage:
     def __init__(self, path: Path) -> None:
         self.path = path
+
+    def describe(self) -> str:
+        return f"local file {self.path}"
 
     def read(self) -> list[str]:
         if not self.path.exists():
@@ -330,6 +335,9 @@ class GitHubStorage:
         self.token = token
         self.branch = branch
         self._sha: str | None = None
+
+    def describe(self) -> str:
+        return f"github {self.repo}@{self.branch}:{self.path}"
 
     @property
     def _api_url(self) -> str:
@@ -482,6 +490,9 @@ class TelegramNotifier:
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_MAX_NEW_PER_RUN = 30
+
+
 @dataclass
 class Config:
     url: str
@@ -498,6 +509,7 @@ class Config:
     telegram_chat_id: str | None
     html_file: Path | None
     dry_run: bool
+    max_new_per_run: int
 
 
 def env(name: str, default: str | None = None) -> str | None:
@@ -537,6 +549,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=NOTIFIER_CHOICES,
         default=env("LISTAM_NOTIFIER", NOTIFIER_STDOUT),
     )
+    parser.add_argument(
+        "--max-new-per-run",
+        type=int,
+        default=int(env("LISTAM_MAX_NEW_PER_RUN", str(DEFAULT_MAX_NEW_PER_RUN))),
+        help=(
+            "Refuse to notify if more than this many listings look new. "
+            "Set to 0 to disable the cap."
+        ),
+    )
     parser.add_argument("--html-file", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -558,6 +579,7 @@ def load_config(args: argparse.Namespace) -> Config:
         telegram_chat_id=env("TELEGRAM_CHAT_ID"),
         html_file=args.html_file,
         dry_run=args.dry_run,
+        max_new_per_run=args.max_new_per_run,
     )
 
 
@@ -606,8 +628,10 @@ def monitor(config: Config) -> int:
     storage = build_storage(config)
     notifier = build_notifier(config)
 
+    print(f"Storage: {storage.describe()}")
     known_ids = storage.read()
     known_id_set = set(known_ids)
+    print(f"Known IDs: {len(known_ids)}")
 
     if config.html_file:
         content = config.html_file.read_text(encoding="utf-8")
@@ -621,11 +645,40 @@ def monitor(config: Config) -> int:
     listings = parse_listings(content, config.url)
     if not listings:
         raise RuntimeError("No listing IDs were found on the page")
+    print(f"Listings on page: {len(listings)}")
 
     new_listings = [listing for listing in listings if listing.id not in known_id_set]
+    print(f"New listings: {len(new_listings)}")
+
     if not new_listings:
         print("No new listings found.")
         return 0
+
+    if not known_id_set:
+        print(
+            "Storage is empty (cold start). Saving snapshot of current page IDs "
+            "without sending notifications. The next run will only notify on "
+            "listings that appear after this snapshot.",
+            file=sys.stderr,
+        )
+        if config.dry_run:
+            print("Dry run enabled; snapshot was not written.")
+            return 0
+        all_ids = [listing.id for listing in listings]
+        storage.write(all_ids, message="Bootstrap list.am listing IDs snapshot")
+        print(f"Saved {len(all_ids)} ID(s) via {config.storage} as cold-start snapshot.")
+        return 0
+
+    if config.max_new_per_run > 0 and len(new_listings) > config.max_new_per_run:
+        print(
+            f"Refusing to notify: {len(new_listings)} new listings exceeds the "
+            f"safety cap of {config.max_new_per_run}. This usually means storage "
+            "was empty or stale. Investigate, then either raise "
+            "LISTAM_MAX_NEW_PER_RUN, snapshot manually, or rerun with "
+            "--max-new-per-run 0 to disable the cap.",
+            file=sys.stderr,
+        )
+        return 1
 
     if config.dry_run:
         stdout_notifier(new_listings)

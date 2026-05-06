@@ -113,8 +113,22 @@ script on a residential IP (e.g. your own machine via `launchd` or `cron`).
 | `LISTAM_NOTIFIER` / `--notifier` | `stdout` | `stdout` or `telegram`. |
 | `TELEGRAM_BOT_TOKEN` | — | Required for `telegram` notifier. |
 | `TELEGRAM_CHAT_ID` | — | Required for `telegram` notifier. |
+| `LISTAM_MAX_NEW_PER_RUN` / `--max-new-per-run` | `30` | Safety cap. Abort instead of notifying when more listings look new than this. Set `0` to disable. |
 | `--html-file` | — | Parse a saved HTML file instead of fetching. |
 | `--dry-run` | off | Print findings, do not notify or save. |
+
+## Safeguards against message storms
+
+Two protections are built in so a missing or empty IDs file can't blast your
+phone:
+
+- **Cold-start bootstrap.** If storage has 0 known IDs, the script saves the
+  current page snapshot and exits without notifying. The next run only
+  reports listings that appear after this snapshot.
+- **Safety cap.** If more than `LISTAM_MAX_NEW_PER_RUN` listings look new
+  (default 30), the run aborts before sending any notifications. Investigate,
+  then either raise the cap, write a snapshot manually, or rerun with
+  `--max-new-per-run 0`.
 
 ## Exit codes
 
