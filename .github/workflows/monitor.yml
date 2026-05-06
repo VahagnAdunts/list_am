@@ -8,10 +8,6 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: listam-monitor
-  cancel-in-progress: false
-
 jobs:
   monitor:
     runs-on: ubuntu-latest
