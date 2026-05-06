@@ -2,7 +2,6 @@ services:
   - type: cron
     name: listam-monitor
     runtime: python
-    plan: free
     schedule: "*/15 * * * *"
     buildCommand: pip install -r requirements.txt
     startCommand: python monitor_listam.py
