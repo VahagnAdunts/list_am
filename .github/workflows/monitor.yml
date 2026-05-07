@@ -38,12 +38,12 @@ jobs:
 
       - name: Commit updated IDs
         run: |
-          if [[ -n "$(git status --porcelain listam_listings.json)" ]]; then
+          if [[ -n "$(git status --porcelain listam_listings.json listam_category_56_ids.json)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add listam_listings.json
+            git add listam_listings.json listam_category_56_ids.json
             git commit -m "Add new list.am listing id(s) [skip ci]"
             git push
           else
-            echo "No changes to listam_listings.json"
+            echo "No changes to listing ID files"
           fi

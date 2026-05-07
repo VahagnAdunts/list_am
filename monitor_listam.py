@@ -34,9 +34,11 @@ from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 
-DEFAULT_URL = "https://www.list.am/category/62/1?n=8&cmtype=0"
+DEFAULT_SELL_URL = "https://www.list.am/category/62/1?n=8&cmtype=0"
+DEFAULT_RENT_URL = "https://www.list.am/category/56/1?n=8&cmtype=0"
 ROOT = Path(__file__).resolve().parent
 DEFAULT_LOCAL_IDS_FILE = ROOT / "listam_listings.json"
+DEFAULT_RENT_IDS_FILE = ROOT / "listam_category_56_ids.json"
 
 DEFAULT_HEADERS: dict[str, str] = {
     "User-Agent": (
@@ -87,6 +89,14 @@ class Listing:
     id: str
     url: str
     title: str
+    category: str = ""
+
+
+@dataclass(frozen=True)
+class MonitoredCategory:
+    label: str
+    url: str
+    ids_path: Path
 
 
 class _ListingParser(HTMLParser):
@@ -421,7 +431,8 @@ def stdout_notifier(listings: list[Listing]) -> list[Listing]:
     print(f"Found {len(listings)} new listing(s):")
     for listing in listings:
         title = f" - {listing.title}" if listing.title else ""
-        print(f"{listing.id}: {listing.url}{title}")
+        prefix = f"{listing.category}: " if listing.category else ""
+        print(f"{prefix}{listing.id}: {listing.url}{title}")
     return list(listings)
 
 
@@ -450,7 +461,9 @@ class TelegramNotifier:
         title = listing.title or f"Listing {listing.id}"
         if len(title) > 250:
             title = title[:247] + "..."
+        category = html.escape(listing.category) if listing.category else "listing"
         return (
+            f"<b>{category}</b>\n"
             "<b>New list.am listing</b>\n"
             f"{html.escape(title)}\n"
             f"{html.escape(listing.url)}"
@@ -491,11 +504,15 @@ class TelegramNotifier:
 
 
 DEFAULT_MAX_NEW_PER_RUN = 30
+CATEGORY_ALL = "all"
+CATEGORY_SELL = "sell"
+CATEGORY_RENT = "rent"
+CATEGORY_CHOICES = (CATEGORY_ALL, CATEGORY_SELL, CATEGORY_RENT)
 
 
 @dataclass
 class Config:
-    url: str
+    categories: list[MonitoredCategory]
     fetcher: str
     browser_binary: str | None
     storage: str
@@ -521,7 +538,19 @@ def env(name: str, default: str | None = None) -> str | None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Monitor list.am for new apartment listings.")
-    parser.add_argument("--url", default=env("LISTAM_URL", DEFAULT_URL))
+    parser.add_argument(
+        "--category",
+        choices=CATEGORY_CHOICES,
+        default=env("LISTAM_CATEGORY", CATEGORY_ALL),
+        help="Which configured category to monitor. Default monitors both sell and rent.",
+    )
+    parser.add_argument("--sell-url", default=env("LISTAM_SELL_URL", DEFAULT_SELL_URL))
+    parser.add_argument("--rent-url", default=env("LISTAM_RENT_URL", DEFAULT_RENT_URL))
+    parser.add_argument(
+        "--url",
+        default=env("LISTAM_URL"),
+        help="Legacy single-category URL override. Prefer --sell-url or --rent-url.",
+    )
     parser.add_argument(
         "--fetcher",
         choices=FETCHER_CHOICES,
@@ -540,6 +569,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ids-file",
         type=Path,
         default=Path(env("LISTAM_IDS_PATH", str(DEFAULT_LOCAL_IDS_FILE))),
+    )
+    parser.add_argument(
+        "--rent-ids-file",
+        type=Path,
+        default=Path(env("LISTAM_RENT_IDS_PATH", str(DEFAULT_RENT_IDS_FILE))),
     )
     parser.add_argument("--github-repo", default=env("GITHUB_REPO"))
     parser.add_argument("--github-path", default=env("GITHUB_PATH", "listam_listings.json"))
@@ -564,8 +598,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_config(args: argparse.Namespace) -> Config:
+    categories = build_categories(args)
     return Config(
-        url=args.url,
+        categories=categories,
         fetcher=args.fetcher,
         browser_binary=args.browser_binary,
         storage=args.storage,
@@ -583,23 +618,53 @@ def load_config(args: argparse.Namespace) -> Config:
     )
 
 
-def build_storage(config: Config) -> Storage:
+def build_categories(args: argparse.Namespace) -> list[MonitoredCategory]:
+    sell_url = args.url or args.sell_url
+    configured = {
+        CATEGORY_SELL: MonitoredCategory(
+            label=CATEGORY_SELL,
+            url=sell_url,
+            ids_path=args.ids_file,
+        ),
+        CATEGORY_RENT: MonitoredCategory(
+            label=CATEGORY_RENT,
+            url=args.rent_url,
+            ids_path=args.rent_ids_file,
+        ),
+    }
+
+    if args.category == CATEGORY_ALL:
+        return [configured[CATEGORY_SELL], configured[CATEGORY_RENT]]
+    return [configured[args.category]]
+
+
+def build_storage(config: Config, ids_path: Path) -> Storage:
     if config.storage == STORAGE_LOCAL:
-        return LocalStorage(config.local_ids_path)
+        return LocalStorage(ids_path)
 
     if config.storage == STORAGE_GITHUB:
         if not config.github_repo:
             raise RuntimeError("GitHub storage requires --github-repo or GITHUB_REPO")
         if not config.github_token:
             raise RuntimeError("GitHub storage requires GITHUB_TOKEN")
+        github_path = repo_relative_path(ids_path)
         return GitHubStorage(
             repo=config.github_repo,
-            path=config.github_path,
+            path=github_path,
             token=config.github_token,
             branch=config.github_branch,
         )
 
     raise ValueError(f"Unknown storage: {config.storage}")
+
+
+def repo_relative_path(path: Path) -> str:
+    if not path.is_absolute():
+        return str(path)
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return path.name
 
 
 def build_notifier(config: Config) -> Notifier:
@@ -625,9 +690,22 @@ def build_notifier(config: Config) -> Notifier:
 
 
 def monitor(config: Config) -> int:
-    storage = build_storage(config)
     notifier = build_notifier(config)
+    exit_code = 0
 
+    for category in config.categories:
+        category_exit_code = monitor_category(config, category, notifier)
+        if category_exit_code != 0 and exit_code == 0:
+            exit_code = category_exit_code
+
+    return exit_code
+
+
+def monitor_category(config: Config, category: MonitoredCategory, notifier: Notifier) -> int:
+    storage = build_storage(config, category.ids_path)
+
+    print(f"Category: {category.label}")
+    print(f"URL: {category.url}")
     print(f"Storage: {storage.describe()}")
     known_ids = storage.read()
     known_id_set = set(known_ids)
@@ -637,12 +715,20 @@ def monitor(config: Config) -> int:
         content = config.html_file.read_text(encoding="utf-8")
     else:
         content = fetch_html(
-            config.url,
+            category.url,
             fetcher=config.fetcher,
             browser_binary=config.browser_binary,
         )
 
-    listings = parse_listings(content, config.url)
+    listings = [
+        Listing(
+            id=listing.id,
+            url=listing.url,
+            title=listing.title,
+            category=category.label,
+        )
+        for listing in parse_listings(content, category.url)
+    ]
     if not listings:
         raise RuntimeError("No listing IDs were found on the page")
     print(f"Listings on page: {len(listings)}")
@@ -693,9 +779,9 @@ def monitor(config: Config) -> int:
     sent_ids = [listing.id for listing in sent_listings]
     storage.write(
         [*known_ids, *sent_ids],
-        message=f"Add {len(sent_ids)} new list.am listing id(s)",
+        message=f"Add {len(sent_ids)} new list.am {category.label} listing id(s)",
     )
-    print(f"Saved {len(sent_ids)} new ID(s) via {config.storage}.")
+    print(f"Saved {len(sent_ids)} new {category.label} ID(s) via {config.storage}.")
 
     if len(sent_listings) != len(new_listings):
         print(

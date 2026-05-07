@@ -1,26 +1,33 @@
 # list.am apartment monitor
 
 Small monitor for detecting new listings on list.am and sending a notification
-about each one. The default URL is the apartments-for-sale category in Yerevan:
+about each one. By default it monitors both sale and rent categories:
 
 ```text
-https://www.list.am/category/62/1?n=8&cmtype=0
+sell: https://www.list.am/category/62/1?n=8&cmtype=0
+rent: https://www.list.am/category/56/1?n=8&cmtype=0
 ```
 
-Listing IDs that have already been seen are stored in `listam_listings.json`.
+Listing IDs that have already been seen are stored separately:
+
+- `listam_listings.json` for `sell`
+- `listam_category_56_ids.json` for `rent`
+
 On every run the script:
 
 1. Downloads the page.
 2. Parses out every `/item/<id>` link.
 3. Compares the IDs to the ones in storage.
-4. For each new ID, sends a notification.
+4. For each new ID, sends a notification starting with `sell` or `rent`.
 5. Saves only the IDs whose notification succeeded, so failures will retry.
 
 ## Local usage
 
 ```bash
-python3 monitor_listam.py                    # auto fetcher, local file, stdout notifier
+python3 monitor_listam.py                    # monitor both categories
 python3 monitor_listam.py --dry-run          # find new IDs, do not write or notify
+python3 monitor_listam.py --category rent    # monitor only rentals
+python3 monitor_listam.py --category sell    # monitor only sales
 python3 monitor_listam.py --fetcher browser  # force headless Chrome
 python3 monitor_listam.py --html-file page.html  # parse a saved HTML file
 ```
@@ -55,11 +62,11 @@ succeeded; the rest are retried on the next run.
 The cron lives in [`.github/workflows/monitor.yml`](.github/workflows/monitor.yml)
 and runs every 15 minutes on GitHub-hosted runners. Each run:
 
-1. Checks out the repo (so it has the current `listam_listings.json`).
+1. Checks out the repo (so it has the current ID JSON files).
 2. Installs `curl_cffi`.
 3. Runs `python monitor_listam.py` with `LISTAM_STORAGE=local` and
    `LISTAM_NOTIFIER=telegram`.
-4. If `listam_listings.json` changed, commits and pushes the diff back as
+4. If either ID JSON file changed, commits and pushes the diff back as
    `github-actions[bot]`. The workflow's auto-provided `GITHUB_TOKEN` has
    `contents: write` so no Personal Access Token is needed.
 
@@ -72,7 +79,7 @@ and runs every 15 minutes on GitHub-hosted runners. Each run:
      `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy your
      `chat.id`. Or message **@userinfobot** to get the id instantly.
 2. **Push this project to a GitHub repo** (private is fine). Make sure
-   `listam_listings.json` is committed at the repo root.
+   both ID files are committed at the repo root.
 3. **Add the Telegram secrets to the repo.**
    - Repo → Settings → Secrets and variables → Actions.
    - Add `TELEGRAM_BOT_TOKEN` (BotFather token) and `TELEGRAM_CHAT_ID`.
@@ -101,11 +108,15 @@ script on a residential IP (e.g. your own machine via `launchd` or `cron`).
 
 | Variable / flag | Default | Notes |
 |---|---|---|
-| `LISTAM_URL` / `--url` | category 62 apartments URL | The page to monitor. |
+| `LISTAM_CATEGORY` / `--category` | `all` | `all`, `sell`, or `rent`. |
+| `LISTAM_SELL_URL` / `--sell-url` | category 62 URL | Sale page to monitor. |
+| `LISTAM_RENT_URL` / `--rent-url` | category 56 URL | Rent page to monitor. |
+| `LISTAM_URL` / `--url` | — | Legacy single URL override for the sell category. |
 | `LISTAM_FETCHER` / `--fetcher` | `auto` | `auto`, `curl_cffi`, `urllib`, `curl`, `browser`. |
 | `LISTAM_BROWSER_BINARY` / `--browser-binary` | autodetect | Path to a Chromium-based browser. |
 | `LISTAM_STORAGE` / `--storage` | `local` | `local` or `github`. |
 | `LISTAM_IDS_PATH` / `--ids-file` | `listam_listings.json` | Used by `local` storage. |
+| `LISTAM_RENT_IDS_PATH` / `--rent-ids-file` | `listam_category_56_ids.json` | Used by `local` storage for rent listings. |
 | `GITHUB_REPO` / `--github-repo` | — | `owner/name`. Required for `github` storage. |
 | `GITHUB_PATH` / `--github-path` | `listam_listings.json` | Path of the JSON inside the repo. |
 | `GITHUB_BRANCH` / `--github-branch` | `main` | Branch to read from and commit to. |
