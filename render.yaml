@@ -1,0 +1,32 @@
+services:
+  - type: cron
+    name: listam-monitor
+    runtime: python
+    plan: starter
+    schedule: "*/15 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 monitor_listam.py
+    envVars:
+      - key: LISTAM_FETCHER
+        value: curl_cffi
+      - key: LISTAM_STORAGE
+        value: github
+      - key: GITHUB_REPO
+        value: VahagnAdunts/list_am
+      - key: GITHUB_BRANCH
+        value: main
+      # GITHUB_PATH is left unset on purpose: the script derives the right
+      # filename per category (sell -> listam_listings.json, rent ->
+      # listam_category_56_ids.json) from --ids-file/--rent-ids-file
+      # defaults, which already match the repo layout.
+      - key: LISTAM_NOTIFIER
+        value: telegram
+      - key: LISTAM_MAX_NEW_PER_RUN
+        value: "30"
+      # Secrets - fill these in via the Render dashboard, not here.
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
