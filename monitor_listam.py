@@ -452,6 +452,14 @@ def stdout_notifier(listings: list[Listing]) -> list[Listing]:
     return list(listings)
 
 
+class TelegramRateLimited(Exception):
+    """Raised when Telegram responds with HTTP 429."""
+
+    def __init__(self, retry_after: float) -> None:
+        super().__init__(f"rate limited, retry after {retry_after}s")
+        self.retry_after = retry_after
+
+
 @dataclass
 class TelegramNotifier:
     bot_token: str
@@ -461,15 +469,26 @@ class TelegramNotifier:
     def __call__(self, listings: list[Listing]) -> list[Listing]:
         sent: list[Listing] = []
         for listing in listings:
-            try:
-                self._send(self._format(listing))
-                sent.append(listing)
-                time.sleep(0.2)
-            except Exception as error:  # noqa: BLE001 - log + continue
-                print(
-                    f"Telegram notify failed for {listing.id}: {error}",
-                    file=sys.stderr,
-                )
+            for attempt in range(3):
+                try:
+                    self._send(self._format(listing))
+                    sent.append(listing)
+                    time.sleep(1.1)  # stay under Telegram's per-chat rate limit
+                    break
+                except TelegramRateLimited as error:
+                    wait = min(error.retry_after, 30) + 1
+                    print(
+                        f"Telegram rate-limited (attempt {attempt + 1}/3); "
+                        f"waiting {wait}s before retrying {listing.id}...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                except Exception as error:  # noqa: BLE001 - log + continue
+                    print(
+                        f"Telegram notify failed for {listing.id}: {error}",
+                        file=sys.stderr,
+                    )
+                    break
         return sent
 
     @staticmethod
@@ -506,6 +525,15 @@ class TelegramNotifier:
                 payload = json.loads(response.read())
         except HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace") if error.fp else ""
+            if error.code == 429:
+                retry_after = 5.0
+                try:
+                    retry_after = float(
+                        json.loads(detail).get("parameters", {}).get("retry_after", 5)
+                    )
+                except Exception:  # noqa: BLE001 - fall back to default wait
+                    pass
+                raise TelegramRateLimited(retry_after) from error
             raise RuntimeError(f"Telegram error ({error.code}): {detail}") from error
         except URLError as error:
             raise RuntimeError(str(error)) from error
