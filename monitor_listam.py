@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 
 DEFAULT_SELL_URL = "https://www.list.am/category/62/1?n=8&cmtype=0"
@@ -166,7 +166,12 @@ def parse_listings(content: str, base_url: str) -> list[Listing]:
 # ---------------------------------------------------------------------------
 
 
-def fetch_html(url: str, fetcher: str, browser_binary: str | None) -> str:
+def fetch_html(
+    url: str,
+    fetcher: str,
+    browser_binary: str | None,
+    proxy_url: str | None = None,
+) -> str:
     fetchers: Sequence[str]
     if fetcher == FETCHER_AUTO:
         fetchers = (FETCHER_CURL_CFFI, FETCHER_URLLIB, FETCHER_CURL, FETCHER_BROWSER)
@@ -177,13 +182,13 @@ def fetch_html(url: str, fetcher: str, browser_binary: str | None) -> str:
     for name in fetchers:
         try:
             if name == FETCHER_CURL_CFFI:
-                return _fetch_with_curl_cffi(url)
+                return _fetch_with_curl_cffi(url, proxy_url)
             if name == FETCHER_URLLIB:
-                return _fetch_with_urllib(url)
+                return _fetch_with_urllib(url, proxy_url)
             if name == FETCHER_CURL:
-                return _fetch_with_curl(url)
+                return _fetch_with_curl(url, proxy_url)
             if name == FETCHER_BROWSER:
-                return _fetch_with_browser(url, browser_binary)
+                return _fetch_with_browser(url, browser_binary, proxy_url)
             raise ValueError(f"Unknown fetcher: {name}")
         except Exception as error:  # noqa: BLE001 - capture and continue
             errors.append(f"{name}: {error}")
@@ -192,7 +197,7 @@ def fetch_html(url: str, fetcher: str, browser_binary: str | None) -> str:
     raise RuntimeError(f"Failed to fetch {url}: {joined}")
 
 
-def _fetch_with_curl_cffi(url: str) -> str:
+def _fetch_with_curl_cffi(url: str, proxy_url: str | None) -> str:
     try:
         from curl_cffi import requests as cffi_requests
     except ImportError as error:
@@ -200,21 +205,29 @@ def _fetch_with_curl_cffi(url: str) -> str:
             "curl_cffi is not installed. Install with: pip install curl_cffi"
         ) from error
 
-    response = cffi_requests.get(url, impersonate="chrome", timeout=30)
+    kwargs: dict[str, object] = {"impersonate": "chrome", "timeout": 30}
+    if proxy_url:
+        kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
+
+    response = cffi_requests.get(url, **kwargs)
     response.raise_for_status()
     return response.text
 
 
-def _fetch_with_urllib(url: str) -> str:
+def _fetch_with_urllib(url: str, proxy_url: str | None) -> str:
     request = Request(url, headers=DEFAULT_HEADERS)
     try:
+        if proxy_url:
+            opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+            with opener.open(request, timeout=30) as response:
+                return response.read().decode("utf-8", errors="replace")
         with urlopen(request, timeout=30) as response:
             return response.read().decode("utf-8", errors="replace")
     except (HTTPError, URLError, TimeoutError) as error:
         raise RuntimeError(str(error)) from error
 
 
-def _fetch_with_curl(url: str) -> str:
+def _fetch_with_curl(url: str, proxy_url: str | None) -> str:
     curl_path = shutil.which("curl")
     if curl_path is None:
         raise RuntimeError("curl is not available on PATH")
@@ -227,6 +240,8 @@ def _fetch_with_curl(url: str) -> str:
         "--silent",
         "--show-error",
     ]
+    if proxy_url:
+        command.extend(["--proxy", proxy_url])
     for name, value in DEFAULT_HEADERS.items():
         command.extend(["--header", f"{name}: {value}"])
     command.append(url)
@@ -258,7 +273,7 @@ def _resolve_browser_binary(browser_binary: str | None) -> str:
     )
 
 
-def _fetch_with_browser(url: str, browser_binary: str | None) -> str:
+def _fetch_with_browser(url: str, browser_binary: str | None, proxy_url: str | None) -> str:
     binary = _resolve_browser_binary(browser_binary)
 
     command = [
@@ -269,9 +284,10 @@ def _fetch_with_browser(url: str, browser_binary: str | None) -> str:
         "--no-default-browser-check",
         "--virtual-time-budget=15000",
         f"--user-agent={DEFAULT_HEADERS['User-Agent']}",
-        "--dump-dom",
-        url,
     ]
+    if proxy_url:
+        command.append(f"--proxy-server={proxy_url}")
+    command.extend(["--dump-dom", url])
 
     result = subprocess.run(command, capture_output=True, check=False, text=True, timeout=90)
     if result.returncode != 0 or not result.stdout.strip():
@@ -515,6 +531,7 @@ class Config:
     categories: list[MonitoredCategory]
     fetcher: str
     browser_binary: str | None
+    proxy_url: str | None
     storage: str
     local_ids_path: Path
     github_repo: str | None
@@ -561,6 +578,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=env("LISTAM_BROWSER_BINARY"),
     )
     parser.add_argument(
+        "--proxy-url",
+        default=env("LISTAM_PROXY_URL"),
+        help=(
+            "HTTP(S) proxy URL used by every fetcher, e.g. "
+            "http://user:pass@host:port. Useful when the host's own IP is "
+            "blocked (e.g. list.am blocking cloud/datacenter IP ranges)."
+        ),
+    )
+    parser.add_argument(
         "--storage",
         choices=STORAGE_CHOICES,
         default=env("LISTAM_STORAGE", STORAGE_LOCAL),
@@ -603,6 +629,7 @@ def load_config(args: argparse.Namespace) -> Config:
         categories=categories,
         fetcher=args.fetcher,
         browser_binary=args.browser_binary,
+        proxy_url=args.proxy_url,
         storage=args.storage,
         local_ids_path=args.ids_file,
         github_repo=args.github_repo,
@@ -707,6 +734,7 @@ def monitor_category(config: Config, category: MonitoredCategory, notifier: Noti
     print(f"Category: {category.label}")
     print(f"URL: {category.url}")
     print(f"Storage: {storage.describe()}")
+    print(f"Proxy: {'enabled' if config.proxy_url else 'disabled'}")
     known_ids = storage.read()
     known_id_set = set(known_ids)
     print(f"Known IDs: {len(known_ids)}")
@@ -718,6 +746,7 @@ def monitor_category(config: Config, category: MonitoredCategory, notifier: Noti
             category.url,
             fetcher=config.fetcher,
             browser_binary=config.browser_binary,
+            proxy_url=config.proxy_url,
         )
 
     listings = [
