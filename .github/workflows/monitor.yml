@@ -1,8 +1,6 @@
 name: list.am monitor
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -36,8 +34,14 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor_listam.py
 
+      # Always attempt to save progress, even if the run above exited
+      # non-zero (e.g. some Telegram sends were rate-limited). Otherwise a
+      # partial failure means NOTHING gets saved and the same backlog of
+      # listings gets retried forever.
       - name: Commit updated IDs
+        if: always()
         run: |
+          git pull --rebase --autostash origin main || true
           if [[ -n "$(git status --porcelain listam_listings.json listam_category_56_ids.json)" ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
